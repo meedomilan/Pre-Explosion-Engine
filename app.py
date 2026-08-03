@@ -5,10 +5,9 @@ import logging
 import math
 import os
 import time
-from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -19,8 +18,9 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
+
 # =========================================================
-# Settings
+# إعدادات Railway
 # =========================================================
 
 BINANCE_BASE = os.getenv("BINANCE_BASE_URL", "https://fapi.binance.com").rstrip("/")
@@ -30,124 +30,395 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 PORT = int(os.getenv("PORT", "8080"))
 TZ = ZoneInfo(os.getenv("TZ", "Asia/Riyadh"))
 
-SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "20"))
-MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "14"))
-RADAR_POOL = int(os.getenv("RADAR_POOL", "120"))
-DEEP_CANDIDATES = int(os.getenv("DEEP_CANDIDATES", "40"))
-MAX_ALERTS_PER_SCAN = int(os.getenv("MAX_ALERTS_PER_SCAN", "3"))
-MIN_QUOTE_VOLUME_USDT = float(os.getenv("MIN_QUOTE_VOLUME_USDT", "1000000"))
+SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "10"))
+MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "18"))
+RADAR_POOL = int(os.getenv("RADAR_POOL", "160"))
+DEEP_CANDIDATES = int(os.getenv("DEEP_CANDIDATES", "55"))
+MAX_ALERTS_PER_SCAN = int(os.getenv("MAX_ALERTS_PER_SCAN", "5"))
+MIN_QUOTE_VOLUME = float(os.getenv("MIN_QUOTE_VOLUME_USDT", "750000"))
 
-ENTRY_MODE = os.getenv("ENTRY_MODE", "BALANCED").strip().upper()
-COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "90"))
-DIRECTION_GAP = float(os.getenv("DIRECTION_GAP", "7"))
+TIMEFRAMES = [
+    tf.strip()
+    for tf in os.getenv("TIMEFRAMES", "15m,1h,4h").split(",")
+    if tf.strip()
+]
+FIXED_MTF = ["1h", "4h", "1d"]
+
+PREP_SCORE = float(os.getenv("PREP_SCORE", "48"))
+EARLY_SCORE = float(os.getenv("EARLY_SCORE", "54"))
+ENTRY_SCORE = float(os.getenv("ENTRY_SCORE", "64"))
+GOLD_SCORE = float(os.getenv("GOLD_SCORE", "78"))
+
+PREP_MTF_COUNT = int(os.getenv("PREP_MTF_COUNT", "1"))
+EARLY_MTF_COUNT = int(os.getenv("EARLY_MTF_COUNT", "1"))
+ENTRY_MTF_COUNT = int(os.getenv("ENTRY_MTF_COUNT", "2"))
+GOLD_MTF_COUNT = int(os.getenv("GOLD_MTF_COUNT", "3"))
+
+MOM_VOL_MULT = float(os.getenv("MOM_VOL_MULT", "1.5"))
+MOM_BODY_ATR = float(os.getenv("MOM_BODY_ATR", "0.60"))
+ENTRY_BODY_ATR = float(os.getenv("ENTRY_BODY_ATR", "0.20"))
+BREAKOUT_LOOKBACK = int(os.getenv("BREAKOUT_LOOKBACK", "10"))
+
+MAX_ENTRY_EXTENSION_ATR = float(os.getenv("MAX_ENTRY_EXTENSION_ATR", "0.55"))
+MIN_SCORE_DRIFT = float(os.getenv("MIN_SCORE_DRIFT", "1.5"))
+DIRECTION_GAP = float(os.getenv("DIRECTION_GAP", "6"))
+COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "75"))
+
+STOP_ATR_BUFFER = float(os.getenv("STOP_ATR_BUFFER", "0.20"))
+STOP_MIN_ATR = float(os.getenv("STOP_MIN_ATR", "0.75"))
 MIN_RR_TP1 = float(os.getenv("MIN_RR_TP1", "1.0"))
-MAX_EARLY_EXTENSION_ATR = float(os.getenv("MAX_EARLY_EXTENSION_ATR", "0.85"))
-MAX_ENTRY_EXTENSION_ATR = float(os.getenv("MAX_ENTRY_EXTENSION_ATR", "0.60"))
-MIN_DRIFT = float(os.getenv("MIN_DRIFT", "2.0"))
+
+SEND_PREP_ALERTS = os.getenv("SEND_PREP_ALERTS", "true").lower() == "true"
+SEND_CANCEL_ALERTS = os.getenv("SEND_CANCEL_ALERTS", "false").lower() == "true"
+SEND_STARTUP_MESSAGE = os.getenv("SEND_STARTUP_MESSAGE", "true").lower() == "true"
+SEND_TEST_MESSAGE = os.getenv("SEND_TEST_MESSAGE", "true").lower() == "true"
+ENABLE_MANUAL_TEST_ENDPOINT = os.getenv("ENABLE_MANUAL_TEST_ENDPOINT", "true").lower() == "true"
 
 BINANCE_RETRIES = int(os.getenv("BINANCE_RETRIES", "4"))
 SYMBOL_TIMEOUT = float(os.getenv("SYMBOL_TIMEOUT", "14"))
 SCAN_TIMEOUT = float(os.getenv("SCAN_TIMEOUT", "55"))
 EXCHANGE_CACHE_SECONDS = int(os.getenv("EXCHANGE_CACHE_SECONDS", "3600"))
 
-SEND_STARTUP_MESSAGE = os.getenv("SEND_STARTUP_MESSAGE", "true").lower() == "true"
-SEND_TEST_MESSAGE = os.getenv("SEND_TEST_MESSAGE", "true").lower() == "true"
-ENABLE_MANUAL_TEST_ENDPOINT = os.getenv("ENABLE_MANUAL_TEST_ENDPOINT", "true").lower() == "true"
-
-DB_PATH = os.getenv("DB_PATH", "data/quantum_entry.db")
+DB_PATH = os.getenv("DB_PATH", "data/golden_entry.db")
 Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
-MODE = {
-    "AGGRESSIVE": {"WATCH": 54, "READY": 63, "ENTRY": 71, "factors": 2},
-    "BALANCED": {"WATCH": 58, "READY": 67, "ENTRY": 75, "factors": 3},
-    "CONSERVATIVE": {"WATCH": 63, "READY": 72, "ENTRY": 81, "factors": 4},
-}.get(ENTRY_MODE, {"WATCH": 58, "READY": 67, "ENTRY": 75, "factors": 3})
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("quantum-entry")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+log = logging.getLogger("golden-entry")
 
 
 # =========================================================
-# Helpers
+# أدوات الحساب
 # =========================================================
 
-def clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
-    return max(lo, min(hi, x))
+def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    return max(low, min(high, value))
+
 
 def safe_div(a: float, b: float, default: float = 0.0) -> float:
     return a / b if b else default
 
-def pct_change(a: float, b: float) -> float:
-    return safe_div(a - b, abs(b), 0.0) * 100.0
 
 def now_local() -> datetime:
     return datetime.now(TZ)
 
-def fmt_price(x: float) -> str:
-    if x >= 1000:
-        return f"{x:,.2f}"
-    if x >= 1:
-        return f"{x:,.4f}".rstrip("0").rstrip(".")
-    if x >= 0.01:
-        return f"{x:.6f}".rstrip("0").rstrip(".")
-    return f"{x:.8f}".rstrip("0").rstrip(".")
 
-def ema(values: list[float], length: int) -> list[float]:
+def fmt_price(value: float) -> str:
+    if value >= 1000:
+        return f"{value:,.2f}"
+    if value >= 1:
+        return f"{value:.5f}".rstrip("0").rstrip(".")
+    if value >= 0.01:
+        return f"{value:.7f}".rstrip("0").rstrip(".")
+    return f"{value:.10f}".rstrip("0").rstrip(".")
+
+
+def ema_series(values: list[float], length: int) -> list[float]:
     if not values:
         return []
     alpha = 2.0 / (length + 1.0)
-    out = [values[0]]
+    output = [values[0]]
     for value in values[1:]:
-        out.append(alpha * value + (1 - alpha) * out[-1])
-    return out
+        output.append(alpha * value + (1.0 - alpha) * output[-1])
+    return output
 
-def stddev(values: list[float]) -> float:
-    if not values:
-        return 0.0
-    m = sum(values) / len(values)
-    return math.sqrt(sum((v - m) ** 2 for v in values) / len(values))
+
+def sma(values: list[float], length: int) -> float:
+    window = values[-length:]
+    return sum(window) / max(1, len(window))
+
+
+def rsi(values: list[float], length: int = 14) -> float:
+    if len(values) < length + 1:
+        return 50.0
+    gains = []
+    losses = []
+    for index in range(len(values) - length, len(values)):
+        change = values[index] - values[index - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+    avg_gain = sum(gains) / length
+    avg_loss = sum(losses) / length
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def macd(values: list[float]) -> tuple[float, float, float, float]:
+    ema12 = ema_series(values, 12)
+    ema26 = ema_series(values, 26)
+    macd_line_series = [a - b for a, b in zip(ema12, ema26)]
+    signal_series = ema_series(macd_line_series, 9)
+    hist_series = [a - b for a, b in zip(macd_line_series, signal_series)]
+    return (
+        macd_line_series[-1],
+        signal_series[-1],
+        hist_series[-1],
+        hist_series[-2] if len(hist_series) > 1 else hist_series[-1],
+    )
+
 
 def atr(rows: list[list[Any]], length: int = 14) -> float:
-    trs = []
-    for i in range(1, len(rows)):
-        high, low = float(rows[i][2]), float(rows[i][3])
-        prev_close = float(rows[i - 1][4])
-        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-    return sum(trs[-length:]) / max(1, min(length, len(trs)))
+    if len(rows) < 2:
+        return 0.0
+    true_ranges = []
+    for index in range(1, len(rows)):
+        high = float(rows[index][2])
+        low = float(rows[index][3])
+        previous_close = float(rows[index - 1][4])
+        true_ranges.append(
+            max(
+                high - low,
+                abs(high - previous_close),
+                abs(low - previous_close),
+            )
+        )
+    return sum(true_ranges[-length:]) / max(1, min(length, len(true_ranges)))
 
-def unpack(rows: list[list[Any]]) -> dict[str, list[float]]:
+
+def score_calc(rows: list[list[Any]], use_current: bool = True) -> float:
+    """مطابقة دالة scoreCalc من مؤشر Ahmed Ultimate قدر الإمكان."""
+    data = rows if use_current else rows[:-1]
+    if len(data) < 205:
+        return 50.0
+
+    opens = [float(row[1]) for row in data]
+    highs = [float(row[2]) for row in data]
+    lows = [float(row[3]) for row in data]
+    closes = [float(row[4]) for row in data]
+    volumes = [float(row[5]) for row in data]
+
+    close = closes[-1]
+    open_price = opens[-1]
+    high = highs[-1]
+    low = lows[-1]
+
+    ema20 = ema_series(closes, 20)[-1]
+    ema50 = ema_series(closes, 50)[-1]
+    ema200 = ema_series(closes, 200)[-1]
+    rsi_value = rsi(closes, 14)
+    macd_line, signal_line, hist, previous_hist = macd(closes)
+    atr_value = atr(data, 14)
+    average_volume = sma(volumes[:-1], 20)
+    volume_ratio = safe_div(volumes[-1], average_volume, 1.0)
+    body_ratio = safe_div(abs(close - open_price), atr_value, 0.0)
+    candle_range = max(high - low, 1e-12)
+    close_location = (close - low) / candle_range
+
+    score = 50.0
+    score += 7.0 if close > ema20 else -7.0
+    score += 8.0 if ema20 > ema50 else -8.0
+    score += 10.0 if ema50 > ema200 else -10.0
+    score += 6.0 if close > ema200 else -6.0
+    score += 7.0 if macd_line > signal_line else -7.0
+    score += 5.0 if hist > 0 else -5.0
+    score += 4.0 if hist > previous_hist else -4.0
+    score += 5.0 if rsi_value > 55 else (-5.0 if rsi_value < 45 else 0.0)
+
+    if close > open_price and volume_ratio >= 1.2:
+        score += 4.0
+    elif close < open_price and volume_ratio >= 1.2:
+        score -= 4.0
+
+    if close > open_price and body_ratio >= 0.6:
+        score += 3.0
+    elif close < open_price and body_ratio >= 0.6:
+        score -= 3.0
+
+    score += 3.0 if close_location >= 0.7 else (-3.0 if close_location <= 0.3 else 0.0)
+    return clamp(score)
+
+
+def golden_scores(rows: list[list[Any]]) -> dict[str, Any]:
+    """مطابقة bullScore / bearScore من المؤشر، باستخدام الشمعة الحالية الحية."""
+    if len(rows) < 205:
+        return {}
+
+    opens = [float(row[1]) for row in rows]
+    highs = [float(row[2]) for row in rows]
+    lows = [float(row[3]) for row in rows]
+    closes = [float(row[4]) for row in rows]
+    volumes = [float(row[5]) for row in rows]
+
+    open_price = opens[-1]
+    high = highs[-1]
+    low = lows[-1]
+    close = closes[-1]
+
+    ma25 = ema_series(closes, 25)[-1]
+    ma50 = ema_series(closes, 50)[-1]
+    ma200 = ema_series(closes, 200)[-1]
+
+    macd_line, signal_line, hist, previous_hist = macd(closes)
+    atr_value = atr(rows, 14)
+    average_volume = sma(volumes[:-1], 20)
+    volume_ratio = safe_div(volumes[-1], average_volume, 1.0)
+    body_ratio = safe_div(abs(close - open_price), atr_value, 0.0)
+
+    candle_range = max(high - low, 1e-12)
+    close_position = clamp((close - low) / candle_range, 0.0, 1.0)
+    buy_pct = close_position * 100.0
+    sell_pct = 100.0 - buy_pct
+
+    previous_high = max(highs[-BREAKOUT_LOOKBACK - 1:-1])
+    previous_low = min(lows[-BREAKOUT_LOOKBACK - 1:-1])
+    bull_breakout = close > previous_high and close > open_price
+    bear_breakout = close < previous_low and close < open_price
+
+    bull = 0.0
+    bull += 8.0 if close > open_price else 0.0
+    bull += 7.0 if close_position >= 0.75 else (4.0 if close_position >= 0.60 else 0.0)
+    bull += 13.0 if volume_ratio >= 2.0 else (10.0 if volume_ratio >= MOM_VOL_MULT else (5.0 if volume_ratio >= 1.2 else 0.0))
+    bull += 10.0 if body_ratio >= 1.0 else (7.0 if body_ratio >= MOM_BODY_ATR else 0.0)
+    bull += 8.0 if macd_line > signal_line else 0.0
+    bull += 7.0 if hist > 0 else 0.0
+    bull += 5.0 if hist > previous_hist else 0.0
+    bull += 5.0 if close > ma25 else 0.0
+    bull += 6.0 if close > ma50 else 0.0
+    bull += 7.0 if close > ma200 else 0.0
+    bull += 4.0 if ma25 > ma50 else 0.0
+    bull += 5.0 if ma50 > ma200 else 0.0
+    bull += 8.0 if buy_pct >= 70 else (5.0 if buy_pct >= 60 else (3.0 if buy_pct >= 55 else 0.0))
+    bull += 7.0 if bull_breakout else 0.0
+
+    bear = 0.0
+    bear += 8.0 if close < open_price else 0.0
+    bear += 7.0 if close_position <= 0.25 else (4.0 if close_position <= 0.40 else 0.0)
+    bear += 13.0 if volume_ratio >= 2.0 else (10.0 if volume_ratio >= MOM_VOL_MULT else (5.0 if volume_ratio >= 1.2 else 0.0))
+    bear += 10.0 if body_ratio >= 1.0 else (7.0 if body_ratio >= MOM_BODY_ATR else 0.0)
+    bear += 8.0 if macd_line < signal_line else 0.0
+    bear += 7.0 if hist < 0 else 0.0
+    bear += 5.0 if hist < previous_hist else 0.0
+    bear += 5.0 if close < ma25 else 0.0
+    bear += 6.0 if close < ma50 else 0.0
+    bear += 7.0 if close < ma200 else 0.0
+    bear += 4.0 if ma25 < ma50 else 0.0
+    bear += 5.0 if ma50 < ma200 else 0.0
+    bear += 8.0 if sell_pct >= 70 else (5.0 if sell_pct >= 60 else (3.0 if sell_pct >= 55 else 0.0))
+    bear += 7.0 if bear_breakout else 0.0
+
     return {
-        "o": [float(x[1]) for x in rows],
-        "h": [float(x[2]) for x in rows],
-        "l": [float(x[3]) for x in rows],
-        "c": [float(x[4]) for x in rows],
-        "v": [float(x[5]) for x in rows],
-        "tb": [float(x[9]) for x in rows],
+        "bull": clamp(bull),
+        "bear": clamp(bear),
+        "price": close,
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "atr": atr_value,
+        "body_ratio": body_ratio,
+        "close_position": close_position,
+        "volume_ratio": volume_ratio,
+        "buy_pct": buy_pct,
+        "sell_pct": sell_pct,
+        "bull_breakout": bull_breakout,
+        "bear_breakout": bear_breakout,
+        "open_time": int(rows[-1][0]),
+        "close_time": int(rows[-1][6]),
     }
 
-def vwap(rows: list[list[Any]]) -> float:
-    pv = vol = 0.0
-    for x in rows:
-        high, low, close, volume = float(x[2]), float(x[3]), float(x[4]), float(x[5])
-        pv += ((high + low + close) / 3.0) * volume
-        vol += volume
-    return safe_div(pv, vol, float(rows[-1][4]) if rows else 0.0)
+
+def choose_stage(direction: str, scores: dict[str, Any], mtf_count: int, is_closed: bool) -> str | None:
+    directional = scores["bull"] if direction == "BUY" else scores["bear"]
+    opposite = scores["bear"] if direction == "BUY" else scores["bull"]
+
+    if directional <= opposite:
+        return None
+
+    direction_ok = (
+        scores["price"] > scores["open"]
+        and scores["close_position"] >= 0.60
+        and scores["body_ratio"] >= ENTRY_BODY_ATR
+        if direction == "BUY"
+        else scores["price"] < scores["open"]
+        and scores["close_position"] <= 0.40
+        and scores["body_ratio"] >= ENTRY_BODY_ATR
+    )
+
+    breakout = scores["bull_breakout"] if direction == "BUY" else scores["bear_breakout"]
+
+    if is_closed and directional >= GOLD_SCORE and mtf_count >= GOLD_MTF_COUNT and breakout:
+        return "CONFIRM"
+
+    if directional >= ENTRY_SCORE and mtf_count >= ENTRY_MTF_COUNT and direction_ok:
+        return "ENTRY"
+
+    if directional >= EARLY_SCORE and mtf_count >= EARLY_MTF_COUNT:
+        return "EARLY"
+
+    if SEND_PREP_ALERTS and directional >= PREP_SCORE and mtf_count >= PREP_MTF_COUNT:
+        return "PREP"
+
+    return None
 
 
-# =========================================================
-# Data models
-# =========================================================
+def stage_rank(stage: str) -> int:
+    return {"PREP": 1, "EARLY": 2, "ENTRY": 3, "CONFIRM": 4}[stage]
+
+
+def build_trade_plan(direction: str, rows: list[list[Any]], price: float, atr_value: float):
+    lows = [float(row[3]) for row in rows[-20:]]
+    highs = [float(row[2]) for row in rows[-20:]]
+    recent_low = min(lows)
+    recent_high = max(highs)
+
+    entry_half = atr_value * 0.08
+    entry_low = price - entry_half
+    entry_high = price + entry_half
+
+    if direction == "BUY":
+        structural_stop = recent_low - atr_value * STOP_ATR_BUFFER
+        minimum_stop = price - atr_value * STOP_MIN_ATR
+        stop = min(structural_stop, minimum_stop)
+        mid = (entry_low + entry_high) / 2.0
+        risk = max(mid - stop, atr_value * STOP_MIN_ATR)
+        tp1 = mid + risk
+        tp2 = mid + 2.0 * risk
+        tp3 = mid + 3.0 * risk
+    else:
+        structural_stop = recent_high + atr_value * STOP_ATR_BUFFER
+        minimum_stop = price + atr_value * STOP_MIN_ATR
+        stop = max(structural_stop, minimum_stop)
+        mid = (entry_low + entry_high) / 2.0
+        risk = max(stop - mid, atr_value * STOP_MIN_ATR)
+        tp1 = mid - risk
+        tp2 = mid - 2.0 * risk
+        tp3 = mid - 3.0 * risk
+
+    rr = lambda target: abs(target - mid) / max(abs(mid - stop), 1e-12)
+
+    return {
+        "entry_low": entry_low,
+        "entry_high": entry_high,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "rr1": rr(tp1),
+        "rr2": rr(tp2),
+        "rr3": rr(tp3),
+    }
+
 
 @dataclass
 class Signal:
     symbol: str
+    timeframe: str
     direction: str
     stage: str
-    engine: str
     score: float
-    timing: float
-    opportunity: float
+    opposite_score: float
+    mtf_count: int
+    score_current: float
+    score_1h: float
+    score_4h: float
+    score_1d: float
+    drift: float
+    extension_atr: float
     price: float
+    candle_open_time: int
     entry_low: float
     entry_high: float
     stop: float
@@ -157,28 +428,28 @@ class Signal:
     rr1: float
     rr2: float
     rr3: float
-    factors: list[str]
-    details: dict[str, Any]
+    reasons: list[str]
 
 
 # =========================================================
-# Database
+# قاعدة البيانات
 # =========================================================
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS opportunities (
+CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    engine TEXT NOT NULL,
-    current_stage TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'OPEN',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    price REAL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    candle_open_time INTEGER NOT NULL,
     score REAL,
-    timing REAL,
-    opportunity REAL,
+    opposite_score REAL,
+    mtf_count INTEGER,
+    drift REAL,
+    extension_atr REAL,
+    price REAL,
     entry_low REAL,
     entry_high REAL,
     stop REAL,
@@ -188,130 +459,122 @@ CREATE TABLE IF NOT EXISTS opportunities (
     rr1 REAL,
     rr2 REAL,
     rr3 REAL,
-    factors_json TEXT,
-    details_json TEXT,
+    reasons_json TEXT,
+    status TEXT DEFAULT 'OPEN',
+    tp1_at TEXT,
+    tp2_at TEXT,
+    tp3_at TEXT,
+    stop_at TEXT,
+    best_price REAL,
+    worst_price REAL,
     outcome TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_opp_open
-ON opportunities(status, symbol, direction, engine);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_stage
+ON signals(symbol,timeframe,direction,stage,candle_open_time);
 
 CREATE TABLE IF NOT EXISTS checkpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
-    scan_no INTEGER,
-    symbols INTEGER,
-    candidates INTEGER,
-    analyzed INTEGER,
-    found INTEGER,
-    sent INTEGER,
-    seconds REAL,
+    scan_number INTEGER,
+    symbols_total INTEGER,
+    candidates_total INTEGER,
+    analyzed_total INTEGER,
+    opportunities_total INTEGER,
+    alerts_sent INTEGER,
+    scan_seconds REAL,
     error TEXT
 );
-
-CREATE TABLE IF NOT EXISTS rejections (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    details_json TEXT
-);
 """
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
         await db.commit()
 
-async def reject(symbol: str, reason: str, details: dict):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO rejections(created_at,symbol,reason,details_json) VALUES(?,?,?,?)",
-            (now_local().isoformat(), symbol, reason, json.dumps(details)),
-        )
-        await db.commit()
 
-async def get_open(symbol: str, direction: str, engine: str):
+async def save_signal(signal: Signal) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        return await (await db.execute(
-            """SELECT * FROM opportunities
-               WHERE status='OPEN' AND symbol=? AND direction=? AND engine=?
-               ORDER BY id DESC LIMIT 1""",
-            (symbol, direction, engine),
-        )).fetchone()
-
-async def save_signal(sig: Signal) -> bool:
-    existing = await get_open(sig.symbol, sig.direction, sig.engine)
-    stage_rank = {"WATCH": 1, "READY": 2, "ENTRY": 3}
-    ts = now_local().isoformat()
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        if existing:
-            last_update = datetime.fromisoformat(existing["updated_at"])
-            if stage_rank[sig.stage] <= stage_rank[existing["current_stage"]]:
-                return False
-            if now_local() - last_update < timedelta(minutes=2):
-                return False
+        try:
             await db.execute(
-                """UPDATE opportunities SET
-                current_stage=?,updated_at=?,price=?,score=?,timing=?,opportunity=?,
-                entry_low=?,entry_high=?,stop=?,tp1=?,tp2=?,tp3=?,rr1=?,rr2=?,rr3=?,
-                factors_json=?,details_json=? WHERE id=?""",
+                """INSERT INTO signals (
+                    created_at,symbol,timeframe,direction,stage,candle_open_time,
+                    score,opposite_score,mtf_count,drift,extension_atr,price,
+                    entry_low,entry_high,stop,tp1,tp2,tp3,rr1,rr2,rr3,reasons_json,
+                    best_price,worst_price
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    sig.stage, ts, sig.price, sig.score, sig.timing, sig.opportunity,
-                    sig.entry_low, sig.entry_high, sig.stop, sig.tp1, sig.tp2, sig.tp3,
-                    sig.rr1, sig.rr2, sig.rr3, json.dumps(sig.factors),
-                    json.dumps(sig.details), existing["id"],
+                    now_local().isoformat(),
+                    signal.symbol,
+                    signal.timeframe,
+                    signal.direction,
+                    signal.stage,
+                    signal.candle_open_time,
+                    signal.score,
+                    signal.opposite_score,
+                    signal.mtf_count,
+                    signal.drift,
+                    signal.extension_atr,
+                    signal.price,
+                    signal.entry_low,
+                    signal.entry_high,
+                    signal.stop,
+                    signal.tp1,
+                    signal.tp2,
+                    signal.tp3,
+                    signal.rr1,
+                    signal.rr2,
+                    signal.rr3,
+                    json.dumps(signal.reasons, ensure_ascii=False),
+                    signal.price,
+                    signal.price,
                 ),
             )
             await db.commit()
             return True
+        except aiosqlite.IntegrityError:
+            return False
 
-        # symbol-level cooldown across engines
-        row = await (await db.execute(
-            """SELECT updated_at FROM opportunities
-               WHERE symbol=? ORDER BY id DESC LIMIT 1""",
-            (sig.symbol,),
-        )).fetchone()
-        if row:
-            last = datetime.fromisoformat(row[0])
-            if now_local() - last < timedelta(minutes=COOLDOWN_MINUTES):
-                return False
 
+async def record_checkpoint(scan_no, symbols, candidates, analyzed, opportunities, alerts, seconds, error=None):
+    async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            """INSERT INTO opportunities(
-            symbol,direction,engine,current_stage,status,created_at,updated_at,
-            price,score,timing,opportunity,entry_low,entry_high,stop,tp1,tp2,tp3,
-            rr1,rr2,rr3,factors_json,details_json)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO checkpoints (
+                created_at,scan_number,symbols_total,candidates_total,
+                analyzed_total,opportunities_total,alerts_sent,scan_seconds,error
+            ) VALUES (?,?,?,?,?,?,?,?,?)""",
             (
-                sig.symbol, sig.direction, sig.engine, sig.stage, "OPEN", ts, ts,
-                sig.price, sig.score, sig.timing, sig.opportunity,
-                sig.entry_low, sig.entry_high, sig.stop, sig.tp1, sig.tp2, sig.tp3,
-                sig.rr1, sig.rr2, sig.rr3,
-                json.dumps(sig.factors), json.dumps(sig.details),
+                now_local().isoformat(),
+                scan_no,
+                symbols,
+                candidates,
+                analyzed,
+                opportunities,
+                alerts,
+                seconds,
+                error,
             ),
         )
         await db.commit()
-        return True
 
 
 # =========================================================
 # Binance
 # =========================================================
 
-class Binance:
+class BinanceClient:
     def __init__(self):
         self.session: aiohttp.ClientSession | None = None
-        self.sem = asyncio.Semaphore(MAX_CONCURRENCY)
+        self.semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
         self.exchange_cache: tuple[float, list[str]] | None = None
-        self.ok = False
-        self.last_error = None
 
     async def start(self):
+        connector = aiohttp.TCPConnector(limit=max(40, MAX_CONCURRENCY * 3), ttl_dns_cache=300)
         self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=20),
-            connector=aiohttp.TCPConnector(limit=MAX_CONCURRENCY * 2, ttl_dns_cache=300),
+            timeout=aiohttp.ClientTimeout(total=20, connect=8),
+            connector=connector,
+            headers={"User-Agent": "Ahmed-Golden-Entry-AI/1.0"},
         )
 
     async def close(self):
@@ -319,590 +582,680 @@ class Binance:
             await self.session.close()
 
     async def get(self, path: str, params=None):
-        assert self.session
-        last = None
-        async with self.sem:
+        assert self.session is not None
+        last_error = None
+
+        async with self.semaphore:
             for attempt in range(BINANCE_RETRIES):
                 try:
-                    async with self.session.get(BINANCE_BASE + path, params=params) as r:
-                        if r.status in (418, 429):
-                            await asyncio.sleep(min(2 ** attempt + 1, 10))
+                    async with self.session.get(BINANCE_BASE + path, params=params) as response:
+                        if response.status in (418, 429):
+                            await asyncio.sleep(min(2 ** attempt + 1, 12))
                             continue
-                        r.raise_for_status()
-                        data = await r.json()
+                        response.raise_for_status()
+                        data = await response.json()
                         if data is None:
-                            raise RuntimeError("null response")
-                        self.ok = True
-                        self.last_error = None
+                            raise RuntimeError("Binance returned null")
                         return data
-                except Exception as exc:
-                    last = exc
-                    self.last_error = repr(exc)
-                    await asyncio.sleep(min(1.5 ** attempt, 6))
-        self.ok = False
-        raise RuntimeError(f"Binance request failed {path}: {last!r}")
+                except Exception as error:
+                    last_error = error
+                    if attempt < BINANCE_RETRIES - 1:
+                        await asyncio.sleep(min(1.5 ** attempt, 8))
 
-    async def symbols(self):
+        raise RuntimeError(f"Binance request failed {path}: {last_error!r}")
+
+    async def symbols(self) -> list[str]:
         if self.exchange_cache and time.time() - self.exchange_cache[0] < EXCHANGE_CACHE_SECONDS:
             return self.exchange_cache[1]
+
         data = await self.get("/fapi/v1/exchangeInfo")
-        items = data.get("symbols") if isinstance(data, dict) else None
-        if not isinstance(items, list):
-            raise RuntimeError("invalid exchangeInfo")
         symbols = [
-            x["symbol"] for x in items
-            if x.get("status") == "TRADING"
-            and x.get("contractType") == "PERPETUAL"
-            and x.get("quoteAsset") == "USDT"
+            item["symbol"]
+            for item in data.get("symbols", [])
+            if item.get("status") == "TRADING"
+            and item.get("contractType") == "PERPETUAL"
+            and item.get("quoteAsset") == "USDT"
         ]
+        if not symbols:
+            raise RuntimeError("No Binance USDT perpetual symbols")
         self.exchange_cache = (time.time(), symbols)
         return symbols
 
     async def tickers(self):
         data = await self.get("/fapi/v1/ticker/24hr")
         if not isinstance(data, list):
-            raise RuntimeError("invalid tickers")
+            raise RuntimeError("Invalid ticker response")
         return data
 
-    async def klines(self, symbol, interval, limit=100):
-        data = await self.get("/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
-        if not isinstance(data, list) or len(data) < 30:
-            raise RuntimeError(f"invalid klines {symbol} {interval}")
+    async def klines(self, symbol: str, interval: str, limit: int = 230):
+        data = await self.get(
+            "/fapi/v1/klines",
+            {"symbol": symbol, "interval": interval, "limit": limit},
+        )
+        if not isinstance(data, list) or len(data) < 205:
+            raise RuntimeError(f"Not enough klines: {symbol} {interval}")
         return data
 
-    async def oi(self, symbol):
-        data = await self.get("/futures/data/openInterestHist", {"symbol": symbol, "period": "5m", "limit": 12})
-        return data if isinstance(data, list) else []
-
-    async def depth(self, symbol):
-        data = await self.get("/fapi/v1/depth", {"symbol": symbol, "limit": 100})
-        return data if isinstance(data, dict) else {}
-
-    async def premium(self, symbol):
-        data = await self.get("/fapi/v1/premiumIndex", {"symbol": symbol})
-        return data if isinstance(data, dict) else {}
+    async def prices(self) -> dict[str, float]:
+        data = await self.get("/fapi/v1/ticker/price")
+        return {
+            item["symbol"]: float(item["price"])
+            for item in data
+            if item.get("symbol") and item.get("price")
+        }
 
 
 # =========================================================
-# Analysis
-# =========================================================
-
-def radar_score(t: dict, prev: dict | None) -> tuple[float, dict]:
-    price = float(t.get("lastPrice", 0) or 0)
-    qv = float(t.get("quoteVolume", 0) or 0)
-    trades = float(t.get("count", 0) or 0)
-    price_burst = vol_burst = trade_burst = 0.0
-    if prev:
-        price_burst = abs(pct_change(price, prev["price"]))
-        vol_burst = max(0.0, pct_change(qv, prev["qv"]))
-        trade_burst = max(0.0, pct_change(trades, prev["trades"]))
-    liquidity = clamp((math.log10(max(qv, 1)) - 5.2) * 22)
-    score = clamp(
-        0.35 * clamp(price_burst * 1200)
-        + 0.25 * clamp(vol_burst * 10)
-        + 0.20 * clamp(trade_burst * 8)
-        + 0.20 * liquidity
-    )
-    return score, {"price": price, "qv": qv, "trades": trades}
-
-def micro(rows, direction):
-    d = unpack(rows)
-    sign = 1 if direction == "BUY" else -1
-    a = atr(rows)
-    price = d["c"][-1]
-    deltas = [2 * tb - v for tb, v in zip(d["tb"], d["v"])]
-    delta_now = sum(deltas[-2:]) * sign
-    delta_prev = sum(deltas[-6:-2]) * sign
-    cvd_now = sum(deltas[-12:]) * sign
-    cvd_prev = sum(deltas[-24:-12]) * sign
-    rh, rl = max(d["h"][-8:-1]), min(d["l"][-8:-1])
-
-    if direction == "BUY":
-        sweep = d["l"][-1] < rl and d["c"][-1] > rl
-        reject = (min(d["o"][-1], d["c"][-1]) - d["l"][-1]) >= (d["h"][-1] - d["l"][-1]) * 0.40
-        bos = d["c"][-1] > max(d["h"][-4:-1])
-        pivot = min(d["l"][-8:])
-        ext = safe_div(price - pivot, a, 99)
-    else:
-        sweep = d["h"][-1] > rh and d["c"][-1] < rh
-        reject = (d["h"][-1] - max(d["o"][-1], d["c"][-1])) >= (d["h"][-1] - d["l"][-1]) * 0.40
-        bos = d["c"][-1] < min(d["l"][-4:-1])
-        pivot = max(d["h"][-8:])
-        ext = safe_div(pivot - price, a, 99)
-
-    avg_vol = sum(d["v"][-20:-1]) / 19
-    vr = safe_div(d["v"][-1], avg_vol, 1)
-    return {
-        "price": price, "atr": a, "sweep": sweep, "reject": reject, "bos": bos,
-        "ext": ext, "volume": vr,
-        "delta": clamp(50 + safe_div(delta_now, max(sum(d["v"][-2:]), 1), 0) * 300),
-        "delta_accel": clamp(50 + safe_div(delta_now - delta_prev, max(sum(d["v"][-6:]), 1), 0) * 330),
-        "cvd": clamp(50 + safe_div(cvd_now, max(sum(d["v"][-12:]), 1), 0) * 280),
-        "cvd_shift": clamp(50 + safe_div(cvd_now - cvd_prev, max(sum(d["v"][-24:]), 1), 0) * 320),
-    }
-
-def context(rows, direction):
-    d = unpack(rows)
-    sign = 1 if direction == "BUY" else -1
-    a = atr(rows)
-    price = d["c"][-1]
-    e9, e21 = ema(d["c"], 9)[-1], ema(d["c"], 21)[-1]
-    trend = clamp(50 + pct_change(e9, e21) * sign * 18)
-    recent_range = max(d["h"][-8:]) - min(d["l"][-8:])
-    compression = clamp((2.4 - safe_div(recent_range, a, 0)) / 1.8 * 100)
-    basis = sum(d["c"][-20:]) / 20
-    dev = stddev(d["c"][-20:])
-    upper, lower = basis + 2 * dev, basis - 2 * dev
-    vw = vwap(rows[-48:])
-    if direction == "BUY":
-        price_context = price >= vw or d["l"][-1] <= lower
-    else:
-        price_context = price <= vw or d["h"][-1] >= upper
-    return {
-        "atr": a, "trend": trend, "compression": compression,
-        "price_context": price_context,
-        "swing_low": min(d["l"][-20:]), "swing_high": max(d["h"][-20:]),
-    }
-
-def oi_features(rows):
-    if len(rows) < 3:
-        return {"change": 0.0, "accel": 50.0}
-    vals = [float(x.get("sumOpenInterest", 0) or 0) for x in rows]
-    change = pct_change(vals[-1], vals[-4] if len(vals) >= 4 else vals[0])
-    recent = pct_change(vals[-1], vals[-2])
-    prev = pct_change(vals[-2], vals[-3])
-    return {"change": change, "accel": clamp(50 + (recent - prev) * 18)}
-
-def book(depth, direction):
-    bids = [(float(p), float(q)) for p, q in depth.get("bids", [])]
-    asks = [(float(p), float(q)) for p, q in depth.get("asks", [])]
-    bn = sum(p * q for p, q in bids[:30])
-    an = sum(p * q for p, q in asks[:30])
-    raw = safe_div(bn - an, bn + an, 0)
-    signed = raw if direction == "BUY" else -raw
-    side = [q for _, q in (bids[:50] if direction == "BUY" else asks[:50])]
-    avg = sum(side) / max(1, len(side))
-    wall = safe_div(max(side, default=0), avg, 0)
-    return {
-        "imbalance": clamp(50 + signed * 180),
-        "absorption": clamp(35 + max(0, wall - 2) * 12),
-        "spoof": clamp(max(0, wall - 8) * 14),
-    }
-
-def detect_zone(rows, direction):
-    d = unpack(rows)
-    a = atr(rows)
-    best = None
-    for i in range(max(3, len(d["c"]) - 24), len(d["c"]) - 3):
-        body = abs(d["c"][i + 1] - d["o"][i + 1])
-        avg_body = sum(abs(d["c"][j] - d["o"][j]) for j in range(max(0, i - 8), i + 1)) / max(1, min(9, i + 1))
-        if body < max(avg_body * 1.5, a * 0.35):
-            continue
-        if direction == "BUY":
-            valid = d["c"][i] < d["o"][i] and d["c"][i + 1] > d["h"][i]
-        else:
-            valid = d["c"][i] > d["o"][i] and d["c"][i + 1] < d["l"][i]
-        if valid:
-            vr = safe_div(d["v"][i], sum(d["v"][max(0, i - 10):i]) / max(1, min(10, i)), 1)
-            best = {"active": True, "low": d["l"][i], "high": d["h"][i], "strength": clamp(55 + vr * 12)}
-    return best or {"active": False, "low": 0.0, "high": 0.0, "strength": 0.0}
-
-def in_zone(price, zone, a):
-    if not zone["active"]:
-        return False
-    b = a * 0.18
-    return zone["low"] - b <= price <= zone["high"] + b
-
-def plan(direction, price, a, swing_low, swing_high, zone=None):
-    if zone and zone.get("active"):
-        zlow, zhigh = zone["low"], zone["high"]
-    else:
-        zlow, zhigh = price - a * 0.18, price + a * 0.18
-    if direction == "BUY":
-        entry_low, entry_high = min(price, zhigh), max(price, zhigh + a * 0.06)
-        stop = min(swing_low, zlow) - a * 0.18
-        mid = (entry_low + entry_high) / 2
-        risk = max(mid - stop, a * 0.55)
-        tps = (mid + risk, mid + 2 * risk, mid + 3 * risk)
-    else:
-        entry_low, entry_high = min(price, zlow - a * 0.06), max(price, zlow)
-        stop = max(swing_high, zhigh) + a * 0.18
-        mid = (entry_low + entry_high) / 2
-        risk = max(stop - mid, a * 0.55)
-        tps = (mid - risk, mid - 2 * risk, mid - 3 * risk)
-    rrs = tuple(abs(tp - mid) / max(abs(mid - stop), 1e-12) for tp in tps)
-    return entry_low, entry_high, stop, *tps, *rrs
-
-def stage(score, timing, ext, factors):
-    if factors < MODE["factors"]:
-        return None
-    if score >= MODE["ENTRY"] and timing >= 68 and ext <= MAX_ENTRY_EXTENSION_ATR:
-        return "ENTRY"
-    if score >= MODE["READY"] and timing >= 54 and ext <= MAX_EARLY_EXTENSION_ATR:
-        return "READY"
-    if score >= MODE["WATCH"] and ext <= MAX_EARLY_EXTENSION_ATR:
-        return "WATCH"
-    return None
-
-def message(sig: Signal):
-    title = {
-        "WATCH": "🟡 مراقبة ما قبل الانفجار",
-        "READY": "🟠 دخول مبكر قبل الانفجار",
-        "ENTRY": "🔥 دخول الآن — بداية الانطلاق",
-    }[sig.stage]
-    side = "شراء" if sig.direction == "BUY" else "بيع"
-    checks = "\n".join(f"✅ {html.escape(x)}" for x in sig.factors[:7])
-    tv = f"https://www.tradingview.com/chart/?symbol=BINANCE:{sig.symbol}.P"
-    bn = f"https://www.binance.com/en/futures/{sig.symbol}"
-    return f"""<b>{title} — {side}</b>
-
-💰 <b>#{sig.symbol}.P</b>
-🧠 المحرك: <b>{sig.engine}</b>
-💵 السعر: <b>{fmt_price(sig.price)}</b>
-
-⚡ الدرجة: <b>{sig.score:.1f}%</b>
-⏱️ التوقيت: <b>{sig.timing:.1f}%</b>
-🎯 جدوى الفرصة: <b>{sig.opportunity:.1f}%</b>
-
-🎯 الدخول: <b>{fmt_price(sig.entry_low)} – {fmt_price(sig.entry_high)}</b>
-🛑 الإبطال: <b>{fmt_price(sig.stop)}</b>
-✅ TP1: <b>{fmt_price(sig.tp1)}</b> ({sig.rr1:.1f}R)
-✅ TP2: <b>{fmt_price(sig.tp2)}</b> ({sig.rr2:.1f}R)
-✅ TP3: <b>{fmt_price(sig.tp3)}</b> ({sig.rr3:.1f}R)
-
-{checks}
-
-📏 الامتداد: <b>{sig.details.get("ext", 0):.2f} ATR</b>
-📈 تغير الدرجة: <b>{sig.details.get("drift", 0):+.1f}</b>
-
-🕒 {now_local().strftime("%d-%m-%Y %H:%M:%S")} (السعودية)
-🔗 <a href="{bn}">Binance</a> | <a href="{tv}">TradingView</a>
-
-⚠️ خطة احتمالية وليست ضمانًا أو تنفيذًا تلقائيًا."""
-
-
-# =========================================================
-# Engine
+# المحرك
 # =========================================================
 
 class Engine:
     def __init__(self):
-        self.b = Binance()
-        self.tg: aiohttp.ClientSession | None = None
+        self.client = BinanceClient()
+        self.telegram_session: aiohttp.ClientSession | None = None
         self.running = True
-        self.scan_no = 0
+        self.scan_number = 0
+        self.symbol_count = 0
+        self.candidate_count = 0
+        self.alert_count = 0
         self.last_scan = None
         self.last_error = None
-        self.symbols_count = 0
-        self.candidates_count = 0
-        self.alerts_count = 0
-        self.fast_state = {}
-        self.score_history: dict[tuple[str, str, str], deque] = {}
-        self.pipeline = {"eligible": 0, "deep": 0, "analyzed": 0, "found": 0, "sent": 0}
+        self.fast_state: dict[str, dict[str, float]] = {}
+        self.score_history: dict[tuple[str, str, str], float] = {}
+        self.active_stages: dict[tuple[str, str, str, int], str] = {}
 
     async def start(self):
         await init_db()
-        await self.b.start()
-        self.tg = aiohttp.ClientSession()
+        await self.client.start()
+        self.telegram_session = aiohttp.ClientSession()
+
         if SEND_STARTUP_MESSAGE:
-            await self.send("✅ <b>Ahmed Quantum Entry AI بدأ العمل</b>\n\n"
-                            f"🎛️ الوضع: <b>{ENTRY_MODE}</b>\n"
-                            "🧠 Pre-Explosion + Order Flow First-Reaction\n"
-                            f"📨 الحد الأعلى لكل دورة: {MAX_ALERTS_PER_SCAN}\n"
-                            "⚠️ لا ينفذ صفقات تلقائيًا.")
+            await self.send_telegram(
+                "✅ <b>Ahmed Golden Entry AI v1 بدأ العمل</b>\n\n"
+                "🧠 المصدر: منطق الشمعة الذهبية في مؤشر Ahmed Ultimate\n"
+                f"⏰ الفريمات: {' / '.join(TIMEFRAMES)}\n"
+                f"🔵 احتمال: {PREP_SCORE:.0f}\n"
+                f"🟡 استعداد: {EARLY_SCORE:.0f}\n"
+                f"🟠 دخول الآن: {ENTRY_SCORE:.0f}\n"
+                f"🔥 تأكيد: {GOLD_SCORE:.0f}\n"
+                "⚠️ لا ينفذ صفقات تلقائيًا."
+            )
+
         if SEND_TEST_MESSAGE:
-            await self.send("🧪 <b>رسالة اختبار ناجحة</b>\n\n✅ Telegram متصل\n✅ Railway يعمل\n✅ قاعدة البيانات جاهزة")
+            await self.send_telegram(
+                "🧪 <b>رسالة اختبار ناجحة</b>\n\n"
+                "✅ Telegram متصل\n"
+                "✅ Railway يعمل\n"
+                "✅ Golden Entry Engine جاهز"
+            )
+
         asyncio.create_task(self.loop())
+        asyncio.create_task(self.track_positions())
 
     async def close(self):
         self.running = False
-        await self.b.close()
-        if self.tg:
-            await self.tg.close()
+        await self.client.close()
+        if self.telegram_session and not self.telegram_session.closed:
+            await self.telegram_session.close()
 
-    async def send(self, text):
-        if not BOT_TOKEN or not CHAT_ID or not self.tg:
+    async def send_telegram(self, text: str) -> bool:
+        if not BOT_TOKEN or not CHAT_ID or not self.telegram_session:
+            log.warning("Telegram variables missing")
             return False
+
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
         try:
-            async with self.tg.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-                timeout=20,
-            ) as r:
-                if r.status != 200:
-                    log.error("Telegram %s: %s", r.status, await r.text())
+            async with self.telegram_session.post(url, json=payload, timeout=20) as response:
+                body = await response.text()
+                if response.status != 200:
+                    log.error("Telegram error %s: %s", response.status, body)
                     return False
                 return True
         except Exception:
-            log.exception("Telegram failed")
+            log.exception("Telegram send failed")
             return False
 
     async def loop(self):
         while self.running:
             started = time.monotonic()
-            self.scan_no += 1
+            self.scan_number += 1
             error = None
-            sent = analyzed = 0
+            analyzed = opportunities = alerts = 0
+
             try:
-                sent, analyzed = await asyncio.wait_for(self.scan(), timeout=SCAN_TIMEOUT)
+                alerts, analyzed, opportunities = await asyncio.wait_for(
+                    self.scan(),
+                    timeout=SCAN_TIMEOUT,
+                )
                 self.last_error = None
-            except Exception as exc:
-                error = repr(exc)
+            except Exception as exception:
+                error = repr(exception)
                 self.last_error = error
-                log.exception("scan failed")
+                log.exception("Scan failed")
+
             elapsed = time.monotonic() - started
             self.last_scan = now_local().isoformat()
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    """INSERT INTO checkpoints(created_at,scan_no,symbols,candidates,analyzed,found,sent,seconds,error)
-                    VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (now_local().isoformat(), self.scan_no, self.symbols_count, self.candidates_count,
-                     analyzed, self.pipeline["found"], sent, elapsed, error),
-                )
-                await db.commit()
-            log.info("scan=%s symbols=%s candidates=%s analyzed=%s found=%s sent=%s seconds=%.1f",
-                     self.scan_no, self.symbols_count, self.candidates_count, analyzed,
-                     self.pipeline["found"], sent, elapsed)
-            await asyncio.sleep(max(5, SCAN_SECONDS - elapsed))
+
+            await record_checkpoint(
+                self.scan_number,
+                self.symbol_count,
+                self.candidate_count,
+                analyzed,
+                opportunities,
+                alerts,
+                elapsed,
+                error,
+            )
+
+            log.info(
+                "scan=%s symbols=%s candidates=%s analyzed=%s opportunities=%s alerts=%s seconds=%.1f",
+                self.scan_number,
+                self.symbol_count,
+                self.candidate_count,
+                analyzed,
+                opportunities,
+                alerts,
+                elapsed,
+            )
+            await asyncio.sleep(max(2, SCAN_SECONDS - elapsed))
+
+    def radar_score(self, ticker: dict) -> tuple[float, dict[str, float]]:
+        symbol = ticker.get("symbol", "")
+        price = float(ticker.get("lastPrice", 0) or 0)
+        quote_volume = float(ticker.get("quoteVolume", 0) or 0)
+        trades = float(ticker.get("count", 0) or 0)
+        day_change = abs(float(ticker.get("priceChangePercent", 0) or 0))
+
+        previous = self.fast_state.get(symbol)
+        price_change = volume_change = trades_change = 0.0
+        if previous:
+            price_change = abs(safe_div(price - previous["price"], previous["price"], 0)) * 100
+            volume_change = max(0, safe_div(quote_volume - previous["volume"], previous["volume"], 0)) * 100
+            trades_change = max(0, safe_div(trades - previous["trades"], previous["trades"], 0)) * 100
+
+        liquidity = clamp((math.log10(max(quote_volume, 1)) - 5.2) * 22)
+        score = clamp(
+            price_change * 650
+            + volume_change * 5
+            + trades_change * 4
+            + liquidity * 0.25
+            + day_change * 1.5
+        )
+        return score, {"price": price, "volume": quote_volume, "trades": trades}
 
     async def scan(self):
-        symbols, tickers = await asyncio.gather(self.b.symbols(), self.b.tickers())
-        self.symbols_count = len(symbols)
+        symbols, tickers = await asyncio.gather(
+            self.client.symbols(),
+            self.client.tickers(),
+        )
+        self.symbol_count = len(symbols)
         allowed = set(symbols)
         ranked = []
-        for t in tickers:
-            if not isinstance(t, dict):
-                continue
-            symbol = t.get("symbol")
+
+        for ticker in tickers:
+            symbol = ticker.get("symbol")
             if symbol not in allowed:
                 continue
-            qv = float(t.get("quoteVolume", 0) or 0)
-            if qv < MIN_QUOTE_VOLUME_USDT:
+            quote_volume = float(ticker.get("quoteVolume", 0) or 0)
+            if quote_volume < MIN_QUOTE_VOLUME:
                 continue
-            s, st = radar_score(t, self.fast_state.get(symbol))
-            self.fast_state[symbol] = st
-            ranked.append((s, qv, symbol))
-        ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        selected = ranked[:RADAR_POOL][:DEEP_CANDIDATES]
-        symbols_to_scan = [x[2] for x in selected]
-        self.candidates_count = len(symbols_to_scan)
 
-        async def guarded(symbol):
+            score, state = self.radar_score(ticker)
+            self.fast_state[symbol] = state
+            ranked.append((score, quote_volume, symbol))
+
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        candidates = [item[2] for item in ranked[:RADAR_POOL]][:DEEP_CANDIDATES]
+        self.candidate_count = len(candidates)
+
+        async def guarded(symbol: str):
             try:
-                return await asyncio.wait_for(self.analyze(symbol), timeout=SYMBOL_TIMEOUT)
-            except Exception as exc:
-                await reject(symbol, "ANALYSIS_ERROR", {"error": repr(exc)})
+                return await asyncio.wait_for(
+                    self.analyze_symbol(symbol),
+                    timeout=SYMBOL_TIMEOUT,
+                )
+            except Exception as error:
+                log.debug("Analysis failed %s: %r", symbol, error)
                 return []
 
-        results = await asyncio.gather(*(guarded(s) for s in symbols_to_scan))
+        results = await asyncio.gather(
+            *(guarded(symbol) for symbol in candidates)
+        )
+
+        signals = [signal for group in results for signal in group]
         analyzed = len(results)
-        all_signals = [sig for group in results for sig in group]
-        all_signals.sort(
-            key=lambda s: (
-                {"WATCH": 1, "READY": 2, "ENTRY": 3}[s.stage],
-                s.opportunity,
-                s.timing,
+        opportunities = len(signals)
+
+        # نرسل الأقوى أولًا، مع حد أعلى في كل دورة.
+        signals.sort(
+            key=lambda signal: (
+                stage_rank(signal.stage),
+                signal.score,
+                signal.drift,
+                -signal.extension_atr,
             ),
             reverse=True,
         )
 
-        # only strongest N signals per scan
-        sent = 0
-        used_symbols = set()
-        for sig in all_signals:
-            if sent >= MAX_ALERTS_PER_SCAN:
+        alerts = 0
+        sent_symbols = set()
+        for signal in signals:
+            if alerts >= MAX_ALERTS_PER_SCAN:
                 break
-            if sig.symbol in used_symbols:
+            symbol_key = (signal.symbol, signal.timeframe)
+            if symbol_key in sent_symbols:
                 continue
-            if await save_signal(sig):
-                if await self.send(message(sig)):
-                    sent += 1
-                    self.alerts_count += 1
-                    used_symbols.add(sig.symbol)
 
-        self.pipeline = {
-            "eligible": len(ranked),
-            "deep": len(symbols_to_scan),
-            "analyzed": analyzed,
-            "found": len(all_signals),
-            "sent": sent,
+            inserted = await save_signal(signal)
+            if not inserted:
+                continue
+
+            ok = await self.send_telegram(self.signal_message(signal))
+            if ok:
+                alerts += 1
+                self.alert_count += 1
+                sent_symbols.add(symbol_key)
+
+        return alerts, analyzed, opportunities
+
+    async def analyze_symbol(self, symbol: str) -> list[Signal]:
+        required_intervals = sorted(set(TIMEFRAMES + FIXED_MTF))
+        data = await asyncio.gather(
+            *(self.client.klines(symbol, interval) for interval in required_intervals)
+        )
+        klines = dict(zip(required_intervals, data))
+        signals = []
+
+        for timeframe in TIMEFRAMES:
+            rows = klines[timeframe]
+            live = golden_scores(rows)
+            if not live:
+                continue
+
+            mtf_scores = {
+                "current": score_calc(rows, use_current=True),
+                "1h": score_calc(klines["1h"], use_current=True),
+                "4h": score_calc(klines["4h"], use_current=True),
+                "1d": score_calc(klines["1d"], use_current=True),
+            }
+
+            bull_count = sum(score >= 58 for score in mtf_scores.values())
+            bear_count = sum(score <= 42 for score in mtf_scores.values())
+
+            now_ms = int(time.time() * 1000)
+            is_current_closed = now_ms > live["close_time"]
+
+            for direction in ("BUY", "SELL"):
+                mtf_count = bull_count if direction == "BUY" else bear_count
+                stage = choose_stage(direction, live, mtf_count, is_current_closed)
+                if not stage:
+                    continue
+
+                directional_score = live["bull"] if direction == "BUY" else live["bear"]
+                opposite_score = live["bear"] if direction == "BUY" else live["bull"]
+
+                if directional_score - opposite_score < DIRECTION_GAP:
+                    continue
+
+                history_key = (symbol, timeframe, direction)
+                previous_score = self.score_history.get(history_key, directional_score)
+                drift = directional_score - previous_score
+                self.score_history[history_key] = directional_score
+
+                # ENTRY يحتاج صعود الدرجة أو وصولًا قويًا واضحًا.
+                if stage == "ENTRY" and drift < MIN_SCORE_DRIFT and directional_score < ENTRY_SCORE + 5:
+                    continue
+
+                if direction == "BUY":
+                    pivot = min(float(row[3]) for row in rows[-8:])
+                    extension = safe_div(live["price"] - pivot, live["atr"], 99)
+                else:
+                    pivot = max(float(row[2]) for row in rows[-8:])
+                    extension = safe_div(pivot - live["price"], live["atr"], 99)
+
+                if stage in ("PREP", "EARLY", "ENTRY") and extension > MAX_ENTRY_EXTENSION_ATR:
+                    continue
+
+                plan = build_trade_plan(
+                    direction,
+                    rows,
+                    live["price"],
+                    live["atr"],
+                )
+                if plan["rr1"] < MIN_RR_TP1:
+                    continue
+
+                reasons = []
+                if live["volume_ratio"] >= 1.2:
+                    reasons.append(f"الحجم {live['volume_ratio']:.2f}× متوسطه")
+                if live["body_ratio"] >= ENTRY_BODY_ATR:
+                    reasons.append(f"جسم الشمعة {live['body_ratio']:.2f} ATR")
+                if direction == "BUY" and live["buy_pct"] >= 55:
+                    reasons.append(f"ضغط الشراء التقديري {live['buy_pct']:.0f}%")
+                if direction == "SELL" and live["sell_pct"] >= 55:
+                    reasons.append(f"ضغط البيع التقديري {live['sell_pct']:.0f}%")
+                if direction == "BUY" and live["bull_breakout"]:
+                    reasons.append("اختراق صاعد حي")
+                if direction == "SELL" and live["bear_breakout"]:
+                    reasons.append("اختراق هابط حي")
+                reasons.append(f"توافق {mtf_count}/4 فريمات")
+                reasons.append(f"الدرجة تتحرك {drift:+.1f}")
+
+                signals.append(Signal(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    direction=direction,
+                    stage=stage,
+                    score=directional_score,
+                    opposite_score=opposite_score,
+                    mtf_count=mtf_count,
+                    score_current=mtf_scores["current"],
+                    score_1h=mtf_scores["1h"],
+                    score_4h=mtf_scores["4h"],
+                    score_1d=mtf_scores["1d"],
+                    drift=drift,
+                    extension_atr=extension,
+                    price=live["price"],
+                    candle_open_time=live["open_time"],
+                    entry_low=plan["entry_low"],
+                    entry_high=plan["entry_high"],
+                    stop=plan["stop"],
+                    tp1=plan["tp1"],
+                    tp2=plan["tp2"],
+                    tp3=plan["tp3"],
+                    rr1=plan["rr1"],
+                    rr2=plan["rr2"],
+                    rr3=plan["rr3"],
+                    reasons=reasons,
+                ))
+
+        # أفضل إشارة فقط لكل عملة في الدورة.
+        if not signals:
+            return []
+        signals.sort(
+            key=lambda signal: (
+                stage_rank(signal.stage),
+                signal.score,
+                signal.drift,
+            ),
+            reverse=True,
+        )
+        return [signals[0]]
+
+    def signal_message(self, signal: Signal) -> str:
+        titles = {
+            "PREP": "🔵 احتمال مبكر قبل الشمعة الذهبية",
+            "EARLY": "🟡 استعداد للشمعة الذهبية",
+            "ENTRY": "🟠 دخول الآن قبل التأكيد",
+            "CONFIRM": "🔥 تأكيد الشمعة الذهبية",
         }
-        return sent, analyzed
+        side = "شراء" if signal.direction == "BUY" else "بيع"
+        reasons = "\n".join(
+            f"✅ {html.escape(reason)}"
+            for reason in signal.reasons[:6]
+        )
+        timestamp = now_local().strftime("%d-%m-%Y %H:%M:%S")
+        binance_url = f"https://www.binance.com/en/futures/{signal.symbol}"
+        tradingview_url = f"https://www.tradingview.com/chart/?symbol=BINANCE:{signal.symbol}.P"
 
-    async def analyze(self, symbol):
-        try:
-            k1m, k3m, k15, k1h, k4h, oirows, depth, premium = await asyncio.gather(
-                self.b.klines(symbol, "1m"),
-                self.b.klines(symbol, "3m"),
-                self.b.klines(symbol, "15m"),
-                self.b.klines(symbol, "1h"),
-                self.b.klines(symbol, "4h"),
-                self.b.oi(symbol),
-                self.b.depth(symbol),
-                self.b.premium(symbol),
-            )
-        except Exception as exc:
-            await reject(symbol, "DATA_FETCH", {"error": repr(exc)})
-            return []
+        return f"""<b>{titles[signal.stage]} — {side}</b>
 
-        candidates = []
+💰 العملة: <b>#{signal.symbol}.P</b>
+⏰ الفريم: <b>{signal.timeframe.upper()}</b>
+💵 السعر: <b>{fmt_price(signal.price)}</b>
 
-        for direction in ("BUY", "SELL"):
-            m1, m3 = micro(k1m, direction), micro(k3m, direction)
-            c15, c1h, c4h = context(k15, direction), context(k1h, direction), context(k4h, direction)
-            oi = oi_features(oirows)
-            ob = book(depth, direction)
-            funding = float(premium.get("lastFundingRate", 0) or 0) * 100
-            funding_support = clamp(50 + ((-funding) if direction == "BUY" else funding) * 900)
+🟢 درجة الشراء: <b>{signal.score:.1f}%</b>
+🔴 الدرجة المقابلة: <b>{signal.opposite_score:.1f}%</b>
+📈 تغير الدرجة: <b>{signal.drift:+.1f}</b>
+📊 توافق الفريمات: <b>{signal.mtf_count}/4</b>
+📏 امتداد الحركة: <b>{signal.extension_atr:.2f} ATR</b>
 
-            position = clamp(48 + max(0, oi["change"]) * 9 + (oi["accel"] - 50) * 0.35 + (funding_support - 50) * 0.15)
-            execution = clamp(0.30*m1["delta_accel"] + 0.18*m3["delta_accel"] + 0.20*m1["cvd_shift"] + 0.14*ob["imbalance"] + 0.18*ob["absorption"])
-            liquidity = clamp(0.50*ob["imbalance"] + 0.30*ob["absorption"] + 0.20*(100-ob["spoof"]))
-            price_pressure = clamp(0.34*c15["compression"] + 0.20*(72 if c15["price_context"] else 42) + 0.18*m1["delta"] + 0.16*(72 if m1["volume"] >= 1.2 else 42) + 0.12*c1h["trend"])
-            timing = clamp(0.28*(80 if m1["bos"] else 44) + 0.18*(76 if m1["reject"] else 42) + 0.14*(76 if m1["sweep"] else 42) + 0.20*m1["delta_accel"] + 0.20*(72 if m1["volume"] >= 1.2 else 42))
-            score = clamp(0.18*position + 0.28*execution + 0.18*liquidity + 0.20*price_pressure + 0.16*timing)
+🎯 الدخول: <b>{fmt_price(signal.entry_low)} – {fmt_price(signal.entry_high)}</b>
+🛑 وقف الخسارة: <b>{fmt_price(signal.stop)}</b>
+✅ TP1: <b>{fmt_price(signal.tp1)}</b> ({signal.rr1:.1f}R)
+✅ TP2: <b>{fmt_price(signal.tp2)}</b> ({signal.rr2:.1f}R)
+✅ TP3: <b>{fmt_price(signal.tp3)}</b> ({signal.rr3:.1f}R)
 
-            factors = []
-            if oi["change"] > 0.10: factors.append(f"OI يرتفع {oi['change']:+.2f}%")
-            if m1["delta_accel"] >= 58: factors.append("Delta يتسارع")
-            if m1["cvd_shift"] >= 58: factors.append("CVD يتحول قبل السعر")
-            if ob["imbalance"] >= 57: factors.append("دفتر الأوامر داعم")
-            if ob["absorption"] >= 55: factors.append("Absorption محتمل")
-            if c15["compression"] >= 55: factors.append("ضغط سعري")
-            if m1["volume"] >= 1.2: factors.append("توسع حجم")
-            if m1["bos"]: factors.append("أول كسر بنية صغير")
+{reasons}
 
-            key = (symbol, direction, "PRE_EXPLOSION")
-            hist = self.score_history.setdefault(key, deque(maxlen=12))
-            prev = hist[-1] if hist else score
-            hist.append(score)
-            drift = score - prev
+🕒 {timestamp} (السعودية)
+🔗 <a href="{binance_url}">Binance</a> | <a href="{tradingview_url}">TradingView</a>
 
-            st = stage(score, timing, m1["ext"], len(factors))
-            opp = clamp(0.52*score + 0.30*timing + 0.18*min(100, 55 + max(0, 1.3-m1["ext"])*28))
-            if st and (st != "ENTRY" or drift >= MIN_DRIFT):
-                p = plan(direction, m1["price"], max(m1["atr"], m3["atr"]), c15["swing_low"], c15["swing_high"])
-                if p[6] >= MIN_RR_TP1:
-                    candidates.append(Signal(symbol,direction,st,"PRE_EXPLOSION",score,timing,opp,m1["price"],*p,factors,{"ext":m1["ext"],"drift":drift}))
+⚠️ الإشارة مبنية على محاكاة منطق المؤشر، وليست ضمانًا أو تنفيذًا تلقائيًا."""
 
-            # Order Flow first reaction
-            zones = [("15M", detect_zone(k15, direction)), ("1H", detect_zone(k1h, direction)), ("4H", detect_zone(k4h, direction))]
-            active = [(tf,z) for tf,z in zones if in_zone(m1["price"], z, m1["atr"])]
-            if active:
-                tf, z = max(active, key=lambda x: x[1]["strength"])
-                rscore = clamp(0.24*z["strength"] + 0.22*m1["delta_accel"] + 0.18*m1["cvd_shift"] + 0.14*ob["imbalance"] + 0.10*ob["absorption"] + 0.12*timing)
-                rf = [f"منطقة Order Flow {tf}"]
-                if m1["reject"]: rf.append("رفض سعري")
-                if m1["sweep"]: rf.append("سحب سيولة")
-                if m1["delta_accel"] >= 56: rf.append("Delta بدأ ينقلب")
-                if m1["cvd_shift"] >= 56: rf.append("CVD بدأ يتحول")
-                if ob["absorption"] >= 55: rf.append("امتصاص")
-                if m1["bos"]: rf.append("أول حركة من المنطقة")
-                rtiming = clamp(0.36*timing + 0.22*m1["delta_accel"] + 0.18*(80 if m1["reject"] else 42) + 0.14*(80 if m1["bos"] else 42) + 0.10*(100-min(100,m1["ext"]*100)))
+    async def track_positions(self):
+        while self.running:
+            try:
+                prices = await self.client.prices()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    db.row_factory = aiosqlite.Row
+                    rows = await (
+                        await db.execute(
+                            "SELECT * FROM signals WHERE status='OPEN' ORDER BY id DESC LIMIT 1000"
+                        )
+                    ).fetchall()
 
-                key = (symbol, direction, "ORDER_FLOW_REACTION")
-                hist = self.score_history.setdefault(key, deque(maxlen=12))
-                prev = hist[-1] if hist else rscore
-                hist.append(rscore)
-                drift = rscore - prev
+                    for row in rows:
+                        price = prices.get(row["symbol"])
+                        if price is None:
+                            continue
 
-                st = stage(rscore, rtiming, m1["ext"], max(0, len(rf)-1))
-                ropp = clamp(0.50*rscore + 0.32*rtiming + 0.18*z["strength"])
-                if st and (st != "ENTRY" or drift >= MIN_DRIFT):
-                    p = plan(direction, m1["price"], max(m1["atr"], m3["atr"]), c15["swing_low"], c15["swing_high"], z)
-                    if p[6] >= MIN_RR_TP1:
-                        candidates.append(Signal(symbol,direction,st,"ORDER_FLOW_FIRST_REACTION",rscore,rtiming,ropp,m1["price"],*p,rf,{"ext":m1["ext"],"drift":drift,"zone_tf":tf}))
+                        direction = row["direction"]
+                        best = row["best_price"] if row["best_price"] is not None else price
+                        worst = row["worst_price"] if row["worst_price"] is not None else price
 
-        if not candidates:
-            return []
-        candidates.sort(key=lambda s: ({"WATCH":1,"READY":2,"ENTRY":3}[s.stage], s.opportunity, s.timing), reverse=True)
-        best = candidates[0]
-        if len(candidates) > 1 and best.direction != candidates[1].direction and best.opportunity - candidates[1].opportunity < DIRECTION_GAP:
-            await reject(symbol, "DIRECTION_CONFLICT", {"a":best.opportunity,"b":candidates[1].opportunity})
-            return []
-        return [best]
+                        if direction == "BUY":
+                            best = max(best, price)
+                            worst = min(worst, price)
+                            hit_tp1 = price >= row["tp1"]
+                            hit_tp2 = price >= row["tp2"]
+                            hit_tp3 = price >= row["tp3"]
+                            hit_stop = price <= row["stop"]
+                        else:
+                            best = min(best, price)
+                            worst = max(worst, price)
+                            hit_tp1 = price <= row["tp1"]
+                            hit_tp2 = price <= row["tp2"]
+                            hit_tp3 = price <= row["tp3"]
+                            hit_stop = price >= row["stop"]
+
+                        updates = {
+                            "best_price": best,
+                            "worst_price": worst,
+                        }
+                        timestamp = now_local().isoformat()
+
+                        if hit_tp1 and not row["tp1_at"]:
+                            updates["tp1_at"] = timestamp
+                        if hit_tp2 and not row["tp2_at"]:
+                            updates["tp2_at"] = timestamp
+                        if hit_tp3:
+                            updates.update({
+                                "tp3_at": row["tp3_at"] or timestamp,
+                                "status": "CLOSED",
+                                "outcome": "TP3",
+                            })
+                        elif hit_stop:
+                            updates.update({
+                                "stop_at": row["stop_at"] or timestamp,
+                                "status": "CLOSED",
+                                "outcome": "SL_AFTER_TP" if row["tp1_at"] or hit_tp1 else "SL",
+                            })
+
+                        set_clause = ", ".join(f"{key}=?" for key in updates)
+                        await db.execute(
+                            f"UPDATE signals SET {set_clause} WHERE id=?",
+                            (*updates.values(), row["id"]),
+                        )
+                    await db.commit()
+
+            except Exception:
+                log.exception("Position tracker failed")
+
+            await asyncio.sleep(60)
 
 
 engine = Engine()
 
+
+# =========================================================
+# FastAPI
+# =========================================================
+
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(app: FastAPI):
     await engine.start()
     yield
     await engine.close()
 
-app = FastAPI(title="Ahmed Quantum Entry AI", lifespan=lifespan)
+
+app = FastAPI(title="Ahmed Golden Entry AI v1", lifespan=lifespan)
+
 
 @app.get("/health")
 async def health():
     return {
-        "ok": engine.last_error is None and engine.b.ok,
-        "service": "Ahmed Quantum Entry AI",
-        "entry_mode": ENTRY_MODE,
-        "scan_no": engine.scan_no,
+        "ok": engine.last_error is None,
+        "service": "Ahmed Golden Entry AI v1",
         "last_scan": engine.last_scan,
         "last_error": engine.last_error,
-        "symbols": engine.symbols_count,
-        "candidates": engine.candidates_count,
-        "alerts_since_start": engine.alerts_count,
-        "pipeline": engine.pipeline,
-        "binance": {"ok": engine.b.ok, "last_error": engine.b.last_error},
+        "scan_number": engine.scan_number,
+        "symbols": engine.symbol_count,
+        "candidates": engine.candidate_count,
+        "alerts_since_start": engine.alert_count,
+        "thresholds": {
+            "prep": PREP_SCORE,
+            "early": EARLY_SCORE,
+            "entry": ENTRY_SCORE,
+            "gold": GOLD_SCORE,
+        },
+        "timeframes": TIMEFRAMES,
         "time": now_local().isoformat(),
     }
+
 
 @app.get("/test-telegram")
 async def test_telegram():
     if not ENABLE_MANUAL_TEST_ENDPOINT:
         return JSONResponse({"ok": False, "error": "disabled"}, status_code=403)
-    ok = await engine.send("🧪 <b>اختبار يدوي ناجح</b>\n\n✅ Ahmed Quantum Entry AI متصل")
+
+    ok = await engine.send_telegram(
+        "🧪 <b>اختبار يدوي ناجح</b>\n\n"
+        "✅ Ahmed Golden Entry AI متصل\n"
+        f"🕒 {now_local().strftime('%d-%m-%Y %H:%M:%S')} (السعودية)"
+    )
     return {"ok": ok}
 
-@app.get("/opportunities")
-async def opportunities(limit: int = 100):
+
+@app.get("/signals")
+async def signals(limit: int = 100):
     limit = max(1, min(limit, 500))
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        rows = await (await db.execute("SELECT * FROM opportunities ORDER BY id DESC LIMIT ?", (limit,))).fetchall()
-    return [dict(x) for x in rows]
+        rows = await (
+            await db.execute(
+                "SELECT * FROM signals ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/stats")
+async def stats():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        overall = await (
+            await db.execute(
+                """SELECT COUNT(*) total,
+                          SUM(status='OPEN') open_count,
+                          SUM(outcome='TP3') tp3,
+                          SUM(outcome='SL') sl,
+                          SUM(outcome='SL_AFTER_TP') sl_after_tp
+                   FROM signals"""
+            )
+        ).fetchone()
+
+        groups = await (
+            await db.execute(
+                """SELECT timeframe,direction,stage,COUNT(*) cases,
+                          SUM(outcome='TP3') tp3,
+                          SUM(outcome='SL') sl,
+                          SUM(outcome='SL_AFTER_TP') sl_after_tp
+                   FROM signals
+                   GROUP BY timeframe,direction,stage
+                   ORDER BY cases DESC"""
+            )
+        ).fetchall()
+
+    return {
+        "overall": dict(overall),
+        "groups": [dict(row) for row in groups],
+    }
+
 
 @app.get("/checkpoints")
 async def checkpoints(limit: int = 100):
     limit = max(1, min(limit, 500))
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        rows = await (await db.execute("SELECT * FROM checkpoints ORDER BY id DESC LIMIT ?", (limit,))).fetchall()
-    return [dict(x) for x in rows]
+        rows = await (
+            await db.execute(
+                "SELECT * FROM checkpoints ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+        ).fetchall()
+    return [dict(row) for row in rows]
 
-@app.get("/stats")
-async def stats():
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        overall = await (await db.execute("SELECT COUNT(*) total, SUM(status='OPEN') open_count FROM opportunities")).fetchone()
-        groups = await (await db.execute("SELECT engine,direction,current_stage,COUNT(*) cases FROM opportunities GROUP BY engine,direction,current_stage")).fetchall()
-    return {"overall": dict(overall), "groups": [dict(x) for x in groups]}
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    h = await health()
-    p = h["pipeline"]
-    return f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Ahmed Quantum Entry AI</title>
-    <style>body{{font-family:Arial;background:#0b1020;color:#eef2ff;padding:24px}}
-    .wrap{{max-width:1000px;margin:auto}}.card{{background:#161e34;border:1px solid #2b3658;border-radius:16px;padding:18px;margin:12px 0}}
-    .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}}
-    .v{{font-size:24px;font-weight:bold}}a{{color:#8db9ff}}</style></head><body><div class="wrap">
-    <h1>Ahmed Quantum Entry AI</h1>
-    <div class="card">الحالة: {'✅ يعمل' if h['ok'] else '⚠️ يوجد خطأ'}<br>الوضع: {ENTRY_MODE}<br>آخر فحص: {h['last_scan']}</div>
-    <div class="grid">
-    <div class="card"><div>العقود</div><div class="v">{h['symbols']}</div></div>
-    <div class="card"><div>المرشحون</div><div class="v">{h['candidates']}</div></div>
-    <div class="card"><div>التنبيهات</div><div class="v">{h['alerts_since_start']}</div></div>
-    <div class="card"><div>رقم الفحص</div><div class="v">{h['scan_no']}</div></div>
-    </div>
-    <div class="card">المسار: {p['eligible']} مؤهل ← {p['deep']} تحليل عميق ← {p['found']} فرصة ← {p['sent']} مرسل</div>
-    <div class="card"><a href="/health">Health</a> · <a href="/test-telegram">Test Telegram</a> · <a href="/opportunities">Opportunities</a> · <a href="/stats">Stats</a> · <a href="/checkpoints">Checkpoints</a></div>
-    </div></body></html>"""
+    status = "يعمل ✅" if engine.last_error is None else "خطأ ⚠️"
+    return f"""<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ahmed Golden Entry AI</title>
+<style>
+body{{font-family:Arial;background:#0b1020;color:#eef2ff;margin:0;padding:24px}}
+.wrap{{max-width:1050px;margin:auto}}
+.card{{background:#151d34;border:1px solid #2b3658;border-radius:16px;padding:18px;margin:12px 0}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}}
+.k{{color:#aab4d2;font-size:13px}} .v{{font-size:25px;font-weight:bold;margin-top:6px}}
+a{{color:#8cb7ff}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Ahmed Golden Entry AI v1</h1>
+<div class="card"><b>{status}</b><br>آخر فحص: {engine.last_scan or "لم يبدأ"}</div>
+<div class="grid">
+<div class="card"><div class="k">رقم الفحص</div><div class="v">{engine.scan_number}</div></div>
+<div class="card"><div class="k">العقود</div><div class="v">{engine.symbol_count}</div></div>
+<div class="card"><div class="k">المرشحون</div><div class="v">{engine.candidate_count}</div></div>
+<div class="card"><div class="k">التنبيهات</div><div class="v">{engine.alert_count}</div></div>
+</div>
+<div class="card">
+🔵 {PREP_SCORE:.0f} · 🟡 {EARLY_SCORE:.0f} · 🟠 {ENTRY_SCORE:.0f} · 🔥 {GOLD_SCORE:.0f}
+</div>
+<div class="card">
+<a href="/health">Health</a> ·
+<a href="/test-telegram">Test Telegram</a> ·
+<a href="/signals">Signals</a> ·
+<a href="/stats">Stats</a> ·
+<a href="/checkpoints">Checkpoints</a>
+</div>
+</div>
+</body>
+</html>"""
+
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=PORT, log_level="info")
